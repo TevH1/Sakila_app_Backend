@@ -2,7 +2,13 @@ from flask import Flask, render_template, request, jsonify
 import mysql.connector
 import os
 
-app = Flask(__name__,  template_folder=os.path.join(os.path.dirname(__file__), "../frontend/templates"))
+base_dir = os.path.dirname(__file__)
+
+frontend_dir = os.path.abspath(os.path.join(base_dir, "../frontend"))
+
+
+app = Flask(__name__,  template_folder=os.path.join(frontend_dir, "templates"),
+    static_folder=os.path.join(frontend_dir, "static"))
 
 
 
@@ -46,7 +52,6 @@ def landing_page():
     conn.close()
 
     return render_template("landing.html", films=films, actors=actors)
-
 
 
 @app.route("/actors")
@@ -140,8 +145,7 @@ def films_page():
     cursor.close()
     conn.close()
 
-    return render_template("films.html", films=films, search=search)
-
+    return render_template("films.html", films=films)
 
 
 
