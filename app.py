@@ -222,38 +222,56 @@ def film_detail_api(film_id):
 def rent_film(film_id):
     customer_id = request.json.get("customer_id")
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    if not customer_id:
+        return jsonify({"error": "customer_id is required"}), 400
 
-    cursor.execute("""
-        SELECT i.inventory_id
-        FROM inventory i
-        LEFT JOIN rental r
-          ON i.inventory_id = r.inventory_id
-          AND r.return_date IS NULL
-        WHERE i.film_id = %s
-        AND r.rental_id IS NULL
-        LIMIT 1;
-    """, (film_id,))
-    inventory = cursor.fetchone()
+    try:
+        conn = get_db_connection()
+        conn.autocommit = False  # ensure we control transactions
+        cursor = conn.cursor(dictionary=True)
 
-    if not inventory:
+        cursor.execute("""
+            SELECT i.inventory_id
+            FROM inventory i
+            LEFT JOIN rental r ON i.inventory_id = r.inventory_id
+              AND r.return_date IS NULL
+            WHERE i.film_id = %s
+              AND r.rental_id IS NULL
+            LIMIT 1;
+        """, (film_id,))
+        inventory = cursor.fetchone()
+
+        if not inventory:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "No copies available to rent"}), 400
+
+        inventory_id = inventory["inventory_id"]
+
+        cursor.execute("""
+            INSERT INTO rental (rental_date, inventory_id, customer_id, staff_id)
+            VALUES (NOW(), %s, %s, 1);
+        """, (inventory_id, customer_id))
+
+        conn.commit()
         cursor.close()
         conn.close()
-        return "No copies available to rent", 400
 
-    inventory_id = inventory["inventory_id"]
+        return jsonify({"success": True, "customer_id": customer_id, "film_id": film_id}), 201
 
-    cursor.execute("""
-        INSERT INTO rental (rental_date, inventory_id, customer_id, staff_id)
-        VALUES (NOW(), %s, %s, 1);
-    """, (inventory_id, customer_id))
-    conn.commit()
+    except mysql.connector.Error as e:
+        print("Database error:", e)
+        try:
+            conn.rollback()
+        except:
+            pass
+        if conn:
+            conn.close()
 
-    cursor.close()
-    conn.close()
-
-    return jsonify({"success": True, "customer_id": customer_id, "film_id": film_id})
+        if e.errno == 1205:
+            return jsonify({"error": "Database timeout — please retry the rental"}), 500
+        else:
+            return jsonify({"error": str(e)}), 500
 
 
 
@@ -386,22 +404,29 @@ def return_rental(rental_id):
 
 @app.route("/api/customers", methods=["POST"])
 def add_customer():
-    if request.method == "POST":
-        first_name = request.json["first_name"]
-        last_name = request.json["last_name"]
-        email = request.json["email"]
+    data = request.get_json()
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    email = data.get("email")
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO customer (store_id, first_name, last_name, email, address_id, create_date)
-            VALUES (1, %s, %s, %s, 1, NOW());
-        """, (first_name, last_name, email))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        return jsonify({"success": True, "customer_id": cursor.lastrowid}), 201
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
 
+    cursor.execute("SELECT address_id FROM customer LIMIT 1;")
+    row = cursor.fetchone()
+    address_id = row["address_id"] if row else 1  # fallback
+
+    cursor.execute("""
+        INSERT INTO customer (store_id, first_name, last_name, email, address_id, create_date)
+        VALUES (1, %s, %s, %s, %s, NOW());
+    """, (first_name, last_name, email, address_id))
+    conn.commit()
+
+    customer_id = cursor.lastrowid
+    cursor.close()
+    conn.close()
+
+    return jsonify({"success": True, "customer_id": customer_id}), 201
 
 
 
@@ -410,9 +435,10 @@ def edit_customer(customer_id):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    first_name = request.json.get("first_name")
-    last_name = request.json.get("last_name")
-    email = request.json.get("email")
+    data = request.get_json()
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    email = data.get("email")
 
     cursor.execute("""
         UPDATE customer
@@ -420,24 +446,48 @@ def edit_customer(customer_id):
         WHERE customer_id=%s;
     """, (first_name, last_name, email, customer_id))
     conn.commit()
+
+    if cursor.rowcount == 0:  
+        cursor.close()
+        conn.close()
+        return jsonify({"error": "Customer not found"}), 404
+
     cursor.close()
     conn.close()
+    return jsonify({"success": True, "customer_id": customer_id})
 
-    return jsonify({"success": True})
 
 
 @app.route("/api/customers/<int:customer_id>", methods=["DELETE"])
 def delete_customer(customer_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM customer WHERE customer_id=%s;", (customer_id,))
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return jsonify({"success": True})
 
+    try:
+        cursor.execute("DELETE FROM payment WHERE customer_id = %s;", (customer_id,))
 
+        cursor.execute("""
+            DELETE r FROM rental r
+            JOIN inventory i ON r.inventory_id = i.inventory_id
+            WHERE r.customer_id = %s;
+        """, (customer_id,))
 
+        cursor.execute("DELETE FROM customer WHERE customer_id = %s;", (customer_id,))
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            conn.close()
+            return jsonify({"error": "Customer not found"}), 404
+
+        cursor.close()
+        conn.close()
+        return jsonify({"success": True, "customer_id": customer_id})
+    except mysql.connector.Error as e:
+        conn.rollback()
+        cursor.close()
+        conn.close()
+        return jsonify({"error": str(e)}), 500
 
 
 
